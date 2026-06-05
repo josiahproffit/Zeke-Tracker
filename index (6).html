@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#15120D" />
+<title>Zeke Tracker</title>
+<style>
+  html, body { margin: 0; padding: 0; }
+  * { -webkit-tap-highlight-color: transparent; }
+  input, button { font-family: inherit; }
+</style>
+<!-- Libraries loaded from CDNs (nothing to install) -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+/* ============================================================
+   STEP 1 — paste your two Supabase values between the quotes.
+   (You'll get these from supabase.com → your project → Settings → API)
+   ============================================================ */
+const SUPABASE_URL      = "https://jqfabdrwcngpndcvhuem.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_YSZaHRkGvxI_gbNNmygIDg_zePGMJJ0";
+/* ============================================================ */
+
+const { useState, useEffect, useRef, useCallback } = React;
+const KEYS_SET = SUPABASE_URL.startsWith("http") && SUPABASE_ANON_KEY.length > 30;
+const sb = KEYS_SET ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+
+const DEFAULT_MEMBERS = ["Josiah", "Olivia", "Sarah", "Michelle"];
+const OVERDUE_MIN = 135; // 2h 15m
+const DISPLAY = '"Fraunces", Georgia, serif';
+const BODY = '"Nunito", "Segoe UI", system-ui, sans-serif';
+
+// ---- helpers ----
+const pad = (n) => String(n).padStart(2, "0");
+function dateKey(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
+function parseKey(k) { const [y, m, d] = k.split("-").map(Number); return new Date(y, m - 1, d); }
+function fmtTime(iso) { const d = new Date(iso); let h = d.getHours(); const ap = h < 12 ? "AM" : "PM"; h = h % 12 || 12; return `${h}:${pad(d.getMinutes())} ${ap}`; }
+function agoStr(ms) { const mins = Math.max(0, Math.floor(ms / 60000)); const h = Math.floor(mins / 60); const m = mins % 60; return h > 0 ? `${h}h ${m}m` : `${m}m`; }
+
+function palette(dark) {
+  return dark
+    ? { bg: "#15120D", card: "#211C15", card2: "#2A2418", text: "#F3EBDD", sub: "#9E9484",
+        border: "#352D20", feed: "#F0A267", feedSoft: "#3a2a18", diaper: "#7FBEB4", diaperSoft: "#1d2e2b",
+        good: "#7BC489", goodSoft: "#1c2c1f", bad: "#E8765C", badSoft: "#33201b", chip: "#2A2418" }
+    : { bg: "#FBF6EC", card: "#FFFFFF", card2: "#FBF3E6", text: "#2C2620", sub: "#8C8378",
+        border: "#ECE2D2", feed: "#DD8243", feedSoft: "#FBEEDF", diaper: "#5A9B91", diaperSoft: "#E4F1EE",
+        good: "#5FA86B", goodSoft: "#E7F2E8", bad: "#D45B43", badSoft: "#FBE6E0", chip: "#F4ECDE" };
+}
+
+// ---- map a DB row to the shape the UI uses ----
+function mapRow(r) {
+  return { id: r.id, kind: r.kind, ts: r.ts, ml: r.ml == null ? "" : String(r.ml),
+    type: r.type, notes: r.notes || "", by: r.logged_by, editedBy: r.edited_by, createdAt: r.created_at };
+}
+
+function App() {
+  const [members, setMembers] = useState(DEFAULT_MEMBERS);
+  const [currentUser, setCurrentUser] = useState(() => localStorage.getItem("zt-user"));
+  const [dark, setDark] = useState(() => localStorage.getItem("zt-theme") !== "light");
+  const [profile, setProfile] = useState({ name: "Zeke", dob: "May 31, 2026", weight: "", peds: "", emergency: "" });
+  const [selDate, setSelDate] = useState(() => dateKey(new Date()));
+  const [events, setEvents] = useState([]);
+  const [prevLast, setPrevLast] = useState({ feed: null, diaper: null });
+  const [now, setNow] = useState(() => new Date());
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
+  const [showMembers, setShowMembers] = useState(false);
+  const focusLock = useRef(0);
+
+  const t = palette(dark);
+  const isToday = selDate === dateKey(new Date());
+
+  // fonts
+  useEffect(() => {
+    if (document.getElementById("zt-fonts")) return;
+    const l = document.createElement("link"); l.id = "zt-fonts"; l.rel = "stylesheet";
+    l.href = "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Nunito:wght@400;600;700;800&display=swap";
+    document.head.appendChild(l);
+  }, []);
+
+  // ---- data loaders ----
+  const loadMembers = useCallback(async () => {
+    const { data } = await sb.from("members").select("name").order("created_at");
+    if (data && data.length) setMembers(data.map(r => r.name));
+    else { await sb.from("members").insert(DEFAULT_MEMBERS.map(n => ({ name: n }))); setMembers(DEFAULT_MEMBERS); }
+  }, []);
+
+  const loadProfile = useCallback(async () => {
+    const { data } = await sb.from("profile").select("*").eq("id", 1).maybeSingle();
+    if (data) setProfile({ name: data.name || "Zeke", dob: data.dob || "", weight: data.weight || "", peds: data.peds || "", emergency: data.emergency || "" });
+    else await sb.from("profile").insert({ id: 1, name: "Zeke", dob: "May 31, 2026" });
+  }, []);
+
+  const loadDay = useCallback(async (key) => {
+    const { data } = await sb.from("events").select("*").eq("day", key).order("created_at");
+    setEvents((data || []).map(mapRow));
+    const prev = parseKey(key); prev.setDate(prev.getDate() - 1);
+    const { data: pd } = await sb.from("events").select("kind,ts").eq("day", dateKey(prev)).order("ts", { ascending: false });
+    const lf = (pd || []).find(r => r.kind === "feed");
+    const ld = (pd || []).find(r => r.kind === "diaper");
+    setPrevLast({ feed: lf ? lf.ts : null, diaper: ld ? ld.ts : null });
+  }, []);
+
+  // initial load + realtime
+  useEffect(() => {
+    if (!sb) return;
+    loadMembers(); loadProfile();
+  }, [loadMembers, loadProfile]);
+
+  useEffect(() => { if (sb) loadDay(selDate); }, [selDate, loadDay]);
+
+  useEffect(() => {
+    if (!sb) return;
+    const ch = sb.channel("zeke-room")
+      .on("postgres_changes", { event: "*", schema: "public", table: "events" }, () => { if (focusLock.current === 0) loadDay(selDate); })
+      .on("postgres_changes", { event: "*", schema: "public", table: "members" }, () => loadMembers())
+      .on("postgres_changes", { event: "*", schema: "public", table: "profile" }, () => loadProfile())
+      .subscribe();
+    return () => { sb.removeChannel(ch); };
+  }, [selDate, loadDay, loadMembers, loadProfile]);
+
+  useEffect(() => { const id = setInterval(() => setNow(new Date()), 30000); return () => clearInterval(id); }, []);
+
+  // ---- time helpers ----
+  const tsToTime = (iso) => { const d = new Date(iso); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+  const timeToTs = (val) => { const [h, m] = (val || "0:0").split(":").map(Number); const d = parseKey(selDate); d.setHours(h || 0, m || 0, 0, 0); return d.toISOString(); };
+
+  const lockOn = () => { focusLock.current += 1; };
+  const lockOff = (fn) => { focusLock.current = Math.max(0, focusLock.current - 1); fn && fn(); };
+
+  // ---- mutations ----
+  const addFeeding = async () => {
+    await sb.from("events").insert({ kind: "feed", ts: new Date().toISOString(), day: selDate, notes: "", logged_by: currentUser });
+    loadDay(selDate);
+  };
+  const addDiaper = async () => {
+    await sb.from("events").insert({ kind: "diaper", ts: new Date().toISOString(), day: selDate, type: "pee", notes: "", logged_by: currentUser });
+    loadDay(selDate);
+  };
+  const removeEvent = async (id) => { setEvents(evs => evs.filter(e => e.id !== id)); await sb.from("events").delete().eq("id", id); };
+  const patch = (id, p) => setEvents(evs => evs.map(e => e.id === id ? { ...e, ...p } : e));
+  const save = async (id) => {
+    const e = events.find(x => x.id === id); if (!e) return;
+    await sb.from("events").update({ ts: e.ts, ml: e.ml === "" ? null : Number(e.ml), type: e.type, notes: e.notes,
+      edited_by: currentUser, edited_at: new Date().toISOString() }).eq("id", id);
+  };
+  const setType = (id, type) => { patch(id, { type }); sb.from("events").update({ type, edited_by: currentUser, edited_at: new Date().toISOString() }).eq("id", id); };
+
+  // ---- derived ----
+  const feeds = events.filter(e => e.kind === "feed");
+  const dips = events.filter(e => e.kind === "diaper");
+  const totalMl = feeds.reduce((s, f) => s + (parseFloat(f.ml) || 0), 0);
+  const pee = dips.filter(d => d.type === "pee").length;
+  const poop = dips.filter(d => d.type === "poop").length;
+  const both = dips.filter(d => d.type === "both").length;
+  const entries = [...events].sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+
+  const lastFeedTs = [...feeds.map(f => f.ts), isToday && prevLast.feed].filter(Boolean).sort().pop();
+  const lastDipTs = [...dips.map(d => d.ts), isToday && prevLast.diaper].filter(Boolean).sort().pop();
+  const feedAgoMs = lastFeedTs ? now - new Date(lastFeedTs) : null;
+  const dipAgoMs = lastDipTs ? now - new Date(lastDipTs) : null;
+  const feedOverdue = feedAgoMs != null && feedAgoMs > OVERDUE_MIN * 60000;
+  const dipOverdue = dipAgoMs != null && dipAgoMs > OVERDUE_MIN * 60000;
+
+  const shiftDay = (n) => { const d = parseKey(selDate); d.setDate(d.getDate() + n); setSelDate(dateKey(d)); };
+  const niceDate = (() => {
+    const d = parseKey(selDate); if (isToday) return "Today";
+    const y = new Date(); y.setDate(y.getDate() - 1);
+    if (selDate === dateKey(y)) return "Yesterday";
+    return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  })();
+
+  const exportCsv = () => {
+    const rows = [["Date", "Type", "Time", "Amount(mL)", "DiaperType", "Notes", "LoggedBy"]];
+    feeds.forEach(f => rows.push([selDate, "Feeding", fmtTime(f.ts), f.ml || "", "", (f.notes || "").replace(/"/g, "'"), f.by || ""]));
+    dips.forEach(d => rows.push([selDate, "Diaper", fmtTime(d.ts), "", d.type, (d.notes || "").replace(/"/g, "'"), d.by || ""]));
+    const csv = rows.map(r => r.map(c => `"${c}"`).join(",")).join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    a.download = `zeke-log-${selDate}.csv`; document.body.appendChild(a); a.click(); a.remove();
+    setMenuOpen(false);
+  };
+
+  const chooseUser = (name) => { setCurrentUser(name); localStorage.setItem("zt-user", name); };
+  const toggleDark = () => { const nd = !dark; setDark(nd); localStorage.setItem("zt-theme", nd ? "dark" : "light"); };
+  const saveProfile = async (p) => { setProfile(p); await sb.from("profile").upsert({ id: 1, ...p }); };
+  const addMember = async (name) => { setMembers(m => [...m, name]); await sb.from("members").insert({ name }); };
+
+  const inputStyle = { width: "100%", boxSizing: "border-box", padding: "12px 14px", fontSize: 17, borderRadius: 12,
+    border: `1px solid ${t.border}`, background: t.card2, color: t.text, fontFamily: BODY, colorScheme: dark ? "dark" : "light" };
+
+  // ---- setup gate (keys not pasted yet) ----
+  if (!KEYS_SET) {
+    return (
+      <div style={{ minHeight: "100vh", background: "#15120D", color: "#F3EBDD", fontFamily: BODY,
+        display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <div style={{ maxWidth: 440 }}>
+          <div style={{ fontSize: 34, fontWeight: 800, marginBottom: 12 }}>Almost there 👋</div>
+          <p style={{ fontSize: 16, lineHeight: 1.6, color: "#C9BFAE" }}>
+            Open this <b>index.html</b> file and paste your two Supabase values near the top —
+            <code style={{ color: "#F0A267" }}> SUPABASE_URL</code> and
+            <code style={{ color: "#F0A267" }}> SUPABASE_ANON_KEY</code> — then re-upload it.
+          </p>
+          <p style={{ fontSize: 15, lineHeight: 1.6, color: "#9E9484" }}>
+            You'll find both at supabase.com → your project → Settings → API.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // ---- name gate ----
+  if (!currentUser) {
+    return (
+      <div style={{ minHeight: "100vh", background: t.bg, fontFamily: BODY, color: t.text,
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <div style={{ fontFamily: DISPLAY, fontSize: 40, fontWeight: 600, marginBottom: 4 }}>Zeke Tracker</div>
+        <div style={{ color: t.sub, marginBottom: 28, fontSize: 17 }}>Who's here right now?</div>
+        <div style={{ width: "100%", maxWidth: 420, display: "grid", gap: 12 }}>
+          {members.map(m => (
+            <button key={m} onClick={() => chooseUser(m)}
+              style={{ padding: "18px 20px", fontSize: 20, fontWeight: 700, borderRadius: 18,
+                border: `1px solid ${t.border}`, background: t.card, color: t.text, cursor: "pointer" }}>{m}</button>
+          ))}
+        </div>
+        <div style={{ color: t.sub, marginTop: 20, fontSize: 13 }}>Tap your name. You can switch anytime.</div>
+      </div>
+    );
+  }
+
+  const Chip = ({ overdue, agoMs, label }) => (
+    <div style={{ flex: 1, background: overdue ? t.badSoft : t.goodSoft, borderRadius: 16, padding: "12px 14px",
+      border: `1px solid ${overdue ? t.bad : t.good}33` }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: overdue ? t.bad : t.good, display: "flex", alignItems: "center", gap: 6 }}>
+        <span style={{ width: 9, height: 9, borderRadius: 9, background: overdue ? t.bad : t.good, display: "inline-block" }} />
+        {label} {overdue ? "Overdue" : "On schedule"}
+      </div>
+      <div style={{ fontSize: 14, color: t.text, marginTop: 4 }}>{agoMs == null ? "No log yet" : `${agoStr(agoMs)} ago`}</div>
+    </div>
+  );
+
+  return (
+    <div style={{ minHeight: "100vh", background: t.bg, color: t.text, fontFamily: BODY }}>
+      <div style={{ position: "sticky", top: 0, zIndex: 20, background: t.bg, borderBottom: `1px solid ${t.border}` }}>
+        <div style={{ maxWidth: 540, margin: "0 auto", padding: "12px 16px 12px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <div style={{ fontFamily: DISPLAY, fontSize: 24, fontWeight: 700 }}>Zeke Tracker</div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <button onClick={toggleDark} style={iconBtn(t)}>{dark ? "\u2600\uFE0F" : "\uD83C\uDF19"}</button>
+              <div style={{ position: "relative" }}>
+                <button onClick={() => setMenuOpen(o => !o)} style={iconBtn(t)}>{"\u22EF"}</button>
+                {menuOpen && (
+                  <div style={{ position: "absolute", right: 0, top: 44, background: t.card, border: `1px solid ${t.border}`,
+                    borderRadius: 14, padding: 6, minWidth: 190, boxShadow: "0 10px 30px rgba(0,0,0,.25)" }}>
+                    {[["Baby profile", () => { setShowProfile(true); setMenuOpen(false); }],
+                      ["Family members", () => { setShowMembers(true); setMenuOpen(false); }],
+                      ["Export today (CSV)", exportCsv]].map(([lbl, fn]) => (
+                      <button key={lbl} onClick={fn} style={{ display: "block", width: "100%", textAlign: "left",
+                        padding: "11px 12px", fontSize: 15, background: "transparent", border: "none", color: t.text,
+                        borderRadius: 9, cursor: "pointer", fontFamily: BODY }}>{lbl}</button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <button onClick={() => shiftDay(-1)} style={iconBtn(t)}>{"\u2039"}</button>
+              <div style={{ minWidth: 96, textAlign: "center", fontWeight: 800, fontSize: 16 }}>{niceDate}</div>
+              <button onClick={() => shiftDay(1)} style={iconBtn(t)}>{"\u203A"}</button>
+              {!isToday && (
+                <button onClick={() => setSelDate(dateKey(new Date()))}
+                  style={{ ...iconBtn(t), width: "auto", padding: "0 12px", fontSize: 13, fontWeight: 700 }}>Today</button>
+              )}
+            </div>
+            <button onClick={() => setCurrentUser(null)}
+              style={{ background: t.chip, border: `1px solid ${t.border}`, borderRadius: 999, padding: "7px 13px",
+                fontSize: 14, fontWeight: 700, color: t.text, cursor: "pointer", fontFamily: BODY }}>{currentUser} {"\u2304"}</button>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 540, margin: "0 auto", padding: "14px 16px 60px" }}>
+        <div style={{ background: t.card, border: `1px solid ${t.border}`, borderRadius: 20, padding: 16, marginBottom: 14 }}>
+          <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+            <Stat t={t} big label="Feedings" value={feeds.length} />
+            <Stat t={t} big label="Total mL" value={Math.round(totalMl)} accent={t.feed} />
+            <Stat t={t} big label="Diapers" value={dips.length} accent={t.diaper} />
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: isToday ? 12 : 0 }}>
+            <Stat t={t} label="Pee" value={pee} />
+            <Stat t={t} label="Poop" value={poop} />
+            <Stat t={t} label="Both" value={both} />
+          </div>
+          {isToday && (
+            <div style={{ display: "flex", gap: 10 }}>
+              <Chip overdue={feedOverdue} agoMs={feedAgoMs} label="Feeding" />
+              <Chip overdue={dipOverdue} agoMs={dipAgoMs} label="Diaper" />
+            </div>
+          )}
+        </div>
+
+        <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+          <button onClick={addFeeding} style={addBtn(t, t.feed, t.feedSoft)}><span style={{ fontSize: 22 }}>{"\uD83C\uDF7C"}</span> Add feeding</button>
+          <button onClick={addDiaper} style={addBtn(t, t.diaper, t.diaperSoft)}><span style={{ fontSize: 22 }}>{"\uD83E\uDDF7"}</span> Add diaper</button>
+        </div>
+
+        {entries.length === 0 ? (
+          <div style={{ textAlign: "center", color: t.sub, padding: "40px 12px", fontSize: 15, lineHeight: 1.5 }}>
+            No entries yet. Tap <b style={{ color: t.feed }}>Add feeding</b> when Zeke finishes eating, then set the time.
+          </div>
+        ) : entries.map((it) => {
+          const feed = it.kind === "feed"; const accent = feed ? t.feed : t.diaper;
+          return (
+            <div key={it.id} style={{ background: t.card, borderRadius: 20, marginBottom: 12, border: `1px solid ${t.border}`, padding: 16 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 22 }}>{feed ? "\uD83C\uDF7C" : "\uD83E\uDDF7"}</span>
+                  <span style={{ fontFamily: DISPLAY, fontSize: 18, fontWeight: 600, color: accent }}>{feed ? "Feeding" : "Diaper"}</span>
+                </div>
+                <button onClick={() => removeEvent(it.id)} style={{ ...iconBtn(t), width: 34, height: 34, fontSize: 14 }}>{"\u2715"}</button>
+              </div>
+              <div style={{ display: "grid", gap: 9 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ color: t.sub, fontWeight: 700, fontSize: 14, minWidth: 56 }}>{feed ? "Finished" : "Time"}</span>
+                  <input type="time" value={tsToTime(it.ts)} onFocus={lockOn} onBlur={() => lockOff(() => save(it.id))}
+                    onChange={(e) => patch(it.id, { ts: timeToTs(e.target.value) })} style={{ ...inputStyle, maxWidth: 160 }} />
+                </div>
+                {feed ? (
+                  <React.Fragment>
+                    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                      <span style={{ color: t.sub, fontWeight: 700, fontSize: 14, minWidth: 56 }}>Amount</span>
+                      <input inputMode="decimal" placeholder="0" value={it.ml} onFocus={lockOn} onBlur={() => lockOff(() => save(it.id))}
+                        onChange={(e) => patch(it.id, { ml: e.target.value.replace(/[^\d.]/g, "") })} style={{ ...inputStyle, maxWidth: 110 }} />
+                      <span style={{ color: t.sub, fontWeight: 700 }}>mL</span>
+                    </div>
+                    <input placeholder="Notes (optional)" value={it.notes} onFocus={lockOn} onBlur={() => lockOff(() => save(it.id))}
+                      onChange={(e) => patch(it.id, { notes: e.target.value })} style={inputStyle} />
+                    <ByLine t={t} verb="Fed" e={it} />
+                  </React.Fragment>
+                ) : (
+                  <React.Fragment>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      {["pee", "poop", "both"].map(ty => (
+                        <button key={ty} onClick={() => setType(it.id, ty)}
+                          style={{ flex: 1, padding: "11px 0", borderRadius: 12, fontSize: 15, fontWeight: 700, cursor: "pointer",
+                            textTransform: "capitalize", fontFamily: BODY,
+                            border: `1px solid ${it.type === ty ? t.diaper : t.border}`,
+                            background: it.type === ty ? t.diaperSoft : t.card2, color: it.type === ty ? t.diaper : t.sub }}>{ty}</button>
+                      ))}
+                    </div>
+                    <input placeholder="Notes (optional)" value={it.notes} onFocus={lockOn} onBlur={() => lockOff(() => save(it.id))}
+                      onChange={(e) => patch(it.id, { notes: e.target.value })} style={inputStyle} />
+                    <ByLine t={t} verb="Changed" e={it} />
+                  </React.Fragment>
+                )}
+              </div>
+            </div>
+          );
+        })}
+
+        <div style={{ textAlign: "center", color: t.sub, fontSize: 12, marginTop: 18 }}>Synced with your family · logged in as {currentUser}</div>
+      </div>
+
+      {showProfile && <ProfileModal t={t} profile={profile} onSave={saveProfile} onClose={() => setShowProfile(false)} inputStyle={inputStyle} />}
+      {showMembers && <MembersModal t={t} members={members} onAdd={addMember} onClose={() => setShowMembers(false)} inputStyle={inputStyle} />}
+    </div>
+  );
+}
+
+function Stat({ t, label, value, big, accent }) {
+  return (
+    <div style={{ flex: 1, background: t.card2, borderRadius: 14, padding: big ? "12px 10px" : "9px 8px", textAlign: "center" }}>
+      <div style={{ fontFamily: DISPLAY, fontSize: big ? 30 : 22, fontWeight: 700, color: accent || t.text, lineHeight: 1 }}>{value}</div>
+      <div style={{ fontSize: 12, color: t.sub, marginTop: 4, fontWeight: 600 }}>{label}</div>
+    </div>
+  );
+}
+function ByLine({ t, verb, e }) {
+  return (
+    <div style={{ fontSize: 13, color: t.sub }}>
+      {verb} by <b style={{ color: t.text }}>{e.by || "\u2014"}</b> at {fmtTime(e.ts)}
+      {e.editedBy && e.editedBy !== e.by && <span> · edited by {e.editedBy}</span>}
+    </div>
+  );
+}
+function ProfileModal({ t, profile, onSave, onClose, inputStyle }) {
+  const [p, setP] = useState(profile);
+  const fields = [["name", "Baby name"], ["dob", "Date of birth"], ["weight", "Current weight"], ["peds", "Pediatrician phone"], ["emergency", "Emergency contact"]];
+  return (
+    <Modal t={t} title="Baby profile" onClose={onClose}>
+      <div style={{ display: "grid", gap: 10 }}>
+        {fields.map(([k, lbl]) => (
+          <div key={k}>
+            <div style={{ fontSize: 13, color: t.sub, marginBottom: 4, fontWeight: 700 }}>{lbl}</div>
+            <input value={p[k] || ""} onChange={(e) => setP({ ...p, [k]: e.target.value })} style={inputStyle} />
+          </div>
+        ))}
+        <button onClick={() => { onSave(p); onClose(); }} style={primaryBtn(t)}>Save</button>
+      </div>
+    </Modal>
+  );
+}
+function MembersModal({ t, members, onAdd, onClose, inputStyle }) {
+  const [name, setName] = useState("");
+  return (
+    <Modal t={t} title="Family members" onClose={onClose}>
+      <div style={{ display: "grid", gap: 8, marginBottom: 12 }}>
+        {members.map(m => <div key={m} style={{ padding: "10px 14px", background: t.card2, borderRadius: 12, fontWeight: 700 }}>{m}</div>)}
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input placeholder="Add a person\u2026" value={name} onChange={(e) => setName(e.target.value)} style={inputStyle} />
+        <button disabled={!name.trim()} onClick={() => { onAdd(name.trim()); setName(""); }}
+          style={{ ...primaryBtn(t), width: "auto", padding: "0 18px", opacity: name.trim() ? 1 : .5 }}>Add</button>
+      </div>
+    </Modal>
+  );
+}
+function Modal({ t, title, onClose, children }) {
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.45)", zIndex: 50, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: t.bg, width: "100%", maxWidth: 540, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, maxHeight: "85vh", overflowY: "auto", fontFamily: BODY }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontFamily: DISPLAY, fontSize: 22, fontWeight: 700, color: t.text }}>{title}</div>
+          <button onClick={onClose} style={iconBtn(t)}>{"\u2715"}</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+function iconBtn(t) {
+  return { width: 40, height: 40, borderRadius: 12, border: `1px solid ${t.border}`, background: t.card, color: t.text,
+    fontSize: 18, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: BODY };
+}
+function addBtn(t, color, soft) {
+  return { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "18px 0",
+    fontSize: 17, fontWeight: 800, borderRadius: 16, cursor: "pointer", fontFamily: BODY, border: `1px solid ${color}`, background: soft, color };
+}
+function primaryBtn(t) {
+  return { width: "100%", padding: "14px 0", fontSize: 17, fontWeight: 800, borderRadius: 14, cursor: "pointer", border: "none", background: t.feed, color: "#fff", fontFamily: BODY };
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
